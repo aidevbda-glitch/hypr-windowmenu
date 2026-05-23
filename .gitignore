@@ -1,0 +1,20 @@
+# Build artifacts
+hypr-windowmenu-*.pkg.tar.zst
+pkg/
+src/__pycache__/
+
+# Python
+*.pyc
+*.pyo
+__pycache__/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

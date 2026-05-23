@@ -1,0 +1,49 @@
+name: Build Arch Package
+
+on:
+  push:
+    branches: [ ci-build ]
+  pull_request:
+    branches: [ ci-build ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel python python-gobject gtk3 gtk-layer-shell git
+
+      - name: Build package
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c 'makepkg --noconfirm --nodeps'
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypr-windowmenu-pkg
+          path: '*.pkg.tar.zst'
+
+      - name: Create Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/ci-build'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: '*.pkg.tar.zst'
+          tag_name: v${{ github.run_number }}
+          name: Release ${{ github.run_number }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
