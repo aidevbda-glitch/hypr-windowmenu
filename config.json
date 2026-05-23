@@ -1,0 +1,82 @@
+{
+    "menu": {
+        "show_title": true,
+        "title_max_length": 40,
+        "separator_before_actions": true
+    },
+    "actions": [
+        {
+            "label": "Close",
+            "icon": "window-close",
+            "dispatcher": "killactive",
+            "arg": "",
+            "confirm": false,
+            "shortcut": "Alt+F4"
+        },
+        {
+            "label": "Force Kill",
+            "icon": "process-stop",
+            "dispatcher": "killactive",
+            "arg": "",
+            "confirm": true,
+            "shortcut": ""
+        },
+        {"type": "separator"},
+        {
+            "label": "Maximize",
+            "icon": "view-fullscreen",
+            "dispatcher": "fullscreen",
+            "arg": "1",
+            "shortcut": "Super+M"
+        },
+        {
+            "label": "Minimize",
+            "icon": "window-minimize",
+            "dispatcher": "movetoworkspacesilent",
+            "arg": "special:minimized",
+            "shortcut": ""
+        },
+        {
+            "label": "Toggle Floating",
+            "icon": "window-popout",
+            "dispatcher": "togglefloating",
+            "arg": "",
+            "shortcut": "Super+Shift+Space"
+        },
+        {
+            "label": "Toggle Pin",
+            "icon": "view-pin",
+            "dispatcher": "pin",
+            "arg": "",
+            "shortcut": "Super+P"
+        },
+        {"type": "separator"},
+        {
+            "label": "Center Window",
+            "icon": "format-justify-center",
+            "dispatcher": "centerwindow",
+            "arg": "",
+            "shortcut": "Super+C"
+        },
+        {
+            "label": "Bring to Top",
+            "icon": "go-top",
+            "dispatcher": "bringactivetotop",
+            "arg": "",
+            "shortcut": ""
+        },
+        {"type": "separator"},
+        {
+            "label": "Move to Workspace",
+            "icon": "go-jump",
+            "type": "submenu_workspaces",
+            "shortcut": "Super+Shift+1..0"
+        },
+        {
+            "label": "Move to Monitor",
+            "icon": "video-display",
+            "type": "submenu_monitors",
+            "shortcut": ""
+        }
+    ]
+}

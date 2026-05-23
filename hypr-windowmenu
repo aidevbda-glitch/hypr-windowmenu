@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+"""
+hypr-windowmenu - Context menu for Hyprland window management
+Shows a GTK context menu at cursor position with window operations.
+"""
+
+import gi
+import json
+import os
+import subprocess
+import sys
+import argparse
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gtk, Gdk, GLib, Gio, GtkLayerShell
+
+
+def run_hyprctl(*args) -> str:
+    """Run hyprctl and return stdout."""
+    cmd = ["hyprctl", "-q"] + list(args)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"hyprctl error: {e}", file=sys.stderr)
+        return ""
+
+
+def run_hyprctl_json(*args) -> dict | list:
+    """Run hyprctl with JSON output and parse."""
+    cmd = ["hyprctl", "-j"] + list(args)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return json.loads(result.stdout)
+    except Exception as e:
+        print(f"hyprctl json error: {e}", file=sys.stderr)
+        return {}
+
+
+class HyprWindowMenu(Gtk.Window):
+    def __init__(self, config_path: str | None = None, window_address: str | None = None):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.window_address = window_address
+        self.window_info = None
+        self.config = self.load_config(config_path)
+        
+        # Set up layer shell for proper Wayland positioning
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+        
+        # Make it look like a context menu
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_default_size(200, 1)
+        
+        # Create list box as menu
+        self.list_box = Gtk.ListBox()
+        self.list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.list_box.set_name("hypr-windowmenu-list")
+        
+        # Add CSS styling
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            #hypr-windowmenu-list {
+                background-color: #2e3440;
+                border-radius: 6px;
+                border: 1px solid #4c566a;
+            }
+            #hypr-windowmenu-list row {
+                padding: 8px 16px;
+                color: #d8dee9;
+            }
+            #hypr-windowmenu-list row:hover {
+                background-color: #4c566a;
+            }
+            #hypr-windowmenu-list row:selected {
+                background-color: #5e81ac;
+            }
+            #hypr-windowmenu-list separator {
+                background-color: #4c566a;
+                min-height: 1px;
+                margin: 4px 12px;
+            }
+            .menu-title {
+                font-weight: bold;
+                color: #eceff4;
+                padding: 8px 16px 4px 16px;
+            }
+            .menu-subtitle {
+                color: #81a1c1;
+                font-size: smaller;
+                padding: 0 16px 8px 16px;
+            }
+            .menu-shortcut {
+                color: #81a1c1;
+                font-size: smaller;
+                margin-left: 12px;
+            }
+        """)
+        screen = Gdk.Screen.get_default()
+        style_context = self.list_box.get_style_context()
+        style_context.add_provider_for_screen(screen, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        
+        # Scrolled window for content
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_max_content_height(600)
+        scrolled.set_propagate_natural_height(True)
+        scrolled.add(self.list_box)
+        
+        self.add(scrolled)
+        
+        # Detect target window
+        if not self.window_address:
+            self.window_info = self.find_window_under_cursor()
+            if self.window_info:
+                self.window_address = self.window_info.get("address")
+        else:
+            self.window_info = self.get_window_by_address(self.window_address)
+        
+        self.build_menu()
+        
+        # Close on Escape and focus-out
+        self.connect("key-press-event", self.on_key_press)
+        self.connect("focus-out-event", self.on_focus_out)
+        self.connect("button-press-event", self.on_button_press)
+    
+    def load_config(self, path: str | None) -> dict:
+        """Load menu configuration from JSON."""
+        default_config = {
+            "menu": {
+                "show_title": True,
+                "title_max_length": 40,
+                "separator_before_actions": True
+            },
+            "actions": [
+                {
+                    "label": "Close",
+                    "icon": "window-close",
+                    "dispatcher": "killactive",
+                    "arg": "",
+                    "confirm": False,
+                    "shortcut": "Alt+F4"
+                },
+                {
+                    "label": "Force Kill",
+                    "icon": "process-stop",
+                    "dispatcher": "killactive",
+                    "arg": "",
+                    "confirm": True,
+                    "shortcut": ""
+                },
+                {"type": "separator"},
+                {
+                    "label": "Maximize",
+                    "icon": "view-fullscreen",
+                    "dispatcher": "fullscreen",
+                    "arg": "1",
+                    "shortcut": "Super+M"
+                },
+                {
+                    "label": "Minimize",
+                    "icon": "window-minimize",
+                    "dispatcher": "movetoworkspacesilent",
+                    "arg": "special:minimized",
+                    "shortcut": ""
+                },
+                {
+                    "label": "Toggle Floating",
+                    "icon": "window-popout",
+                    "dispatcher": "togglefloating",
+                    "arg": "",
+                    "shortcut": "Super+Shift+Space"
+                },
+                {
+                    "label": "Toggle Pin",
+                    "icon": "view-pin",
+                    "dispatcher": "pin",
+                    "arg": "",
+                    "shortcut": "Super+P"
+                },
+                {"type": "separator"},
+                {
+                    "label": "Center Window",
+                    "icon": "format-justify-center",
+                    "dispatcher": "centerwindow",
+                    "arg": "",
+                    "shortcut": "Super+C"
+                },
+                {
+                    "label": "Bring to Top",
+                    "icon": "go-top",
+                    "dispatcher": "bringactivetotop",
+                    "arg": "",
+                    "shortcut": ""
+                },
+                {"type": "separator"},
+                {
+                    "label": "Move to Workspace",
+                    "icon": "go-jump",
+                    "type": "submenu_workspaces",
+                    "shortcut": "Super+Shift+1..0"
+                },
+                {
+                    "label": "Move to Monitor",
+                    "icon": "video-display",
+                    "type": "submenu_monitors",
+                    "shortcut": ""
+                }
+            ]
+        }
+        
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    user_config = json.load(f)
+                    if "actions" in user_config:
+                        default_config["actions"] = user_config["actions"]
+                    if "menu" in user_config:
+                        default_config["menu"].update(user_config["menu"])
+            except Exception as e:
+                print(f"Config load error: {e}", file=sys.stderr)
+        
+        # Also check standard config paths
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        for cfg_path in [
+            os.path.join(xdg_config, "hypr-windowmenu", "config.json"),
+            os.path.join(xdg_config, "hypr", "windowmenu.json"),
+        ]:
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r") as f:
+                        user_config = json.load(f)
+                        if "actions" in user_config:
+                            default_config["actions"] = user_config["actions"]
+                        if "menu" in user_config:
+                            default_config["menu"].update(user_config["menu"])
+                    break
+                except Exception as e:
+                    print(f"Config load error from {cfg_path}: {e}", file=sys.stderr)
+        
+        return default_config
+    
+    def get_cursor_pos(self) -> tuple[int, int]:
+        """Get current cursor position in global layout coordinates."""
+        try:
+            output = run_hyprctl("cursorpos")
+            parts = output.split(",")
+            if len(parts) == 2:
+                return int(parts[0].strip()), int(parts[1].strip())
+        except Exception as e:
+            print(f"Cursor pos error: {e}", file=sys.stderr)
+        
+        # Fallback: get from Gdk
+        display = Gdk.Display.get_default()
+        if display:
+            seat = display.get_default_seat()
+            pointer = seat.get_pointer()
+            screen = display.get_default_screen()
+            x, y = pointer.get_position()
+            return x, y
+        return (0, 0)
+    
+    def find_window_under_cursor(self) -> dict | None:
+        """Find the topmost window containing the cursor."""
+        cursor_x, cursor_y = self.get_cursor_pos()
+        clients = run_hyprctl_json("clients")
+        
+        if not isinstance(clients, list):
+            return None
+        
+        candidates = []
+        for w in clients:
+            at = w.get("at", [0, 0])
+            size = w.get("size", [0, 0])
+            wx, wy = at[0], at[1]
+            ww, wh = size[0], size[1]
+            
+            if wx <= cursor_x <= wx + ww and wy <= cursor_y <= wy + wh:
+                score = 0
+                if w.get("floating", False):
+                    score += 1000
+                if w.get("pinned", False):
+                    score += 500
+                if w.get("focusHistoryID", 999) == 0:
+                    score += 200
+                candidates.append((score, w))
+        
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
+        
+        # Fallback to active window
+        active = run_hyprctl_json("activewindow")
+        if active and isinstance(active, dict) and active.get("address"):
+            return active
+        
+        return None
+    
+    def get_window_by_address(self, addr: str) -> dict | None:
+        """Find window by its address."""
+        clients = run_hyprctl_json("clients")
+        if isinstance(clients, list):
+            for w in clients:
+                if w.get("address") == addr:
+                    return w
+        return None
+    
+    def get_workspaces(self) -> list[dict]:
+        """Get list of workspaces."""
+        workspaces = run_hyprctl_json("workspaces")
+        if isinstance(workspaces, list):
+            return workspaces
+        return []
+    
+    def get_monitors(self) -> list[dict]:
+        """Get list of monitors."""
+        monitors = run_hyprctl_json("monitors")
+        if isinstance(monitors, list):
+            return monitors
+        return []
+    
+    def execute_dispatcher(self, dispatcher: str, arg: str = ""):
+        """Execute a Hyprland dispatcher."""
+        if self.window_address and dispatcher in ["killactive", "fullscreen", "togglefloating", "pin", "centerwindow", "bringactivetotop"]:
+            run_hyprctl("dispatch", "focuswindow", f"address:{self.window_address}")
+            if arg:
+                run_hyprctl("dispatch", dispatcher, arg)
+            else:
+                run_hyprctl("dispatch", dispatcher)
+        elif self.window_address:
+            if arg:
+                run_hyprctl("dispatch", dispatcher, f"{arg},address:{self.window_address}")
+            else:
+                run_hyprctl("dispatch", dispatcher, f"address:{self.window_address}")
+        else:
+            if arg:
+                run_hyprctl("dispatch", dispatcher, arg)
+            else:
+                run_hyprctl("dispatch", dispatcher)
+    
+    def build_menu(self):
+        """Build the context menu from config."""
+        # Window title header (non-clickable)
+        if self.config["menu"].get("show_title", True) and self.window_info:
+            title = self.window_info.get("title", "Unknown")
+            clazz = self.window_info.get("class", "")
+            max_len = self.config["menu"].get("title_max_length", 40)
+            if len(title) > max_len:
+                title = title[:max_len - 3] + "..."
+            
+            # Title row
+            title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            title_label = Gtk.Label()
+            title_label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
+            title_label.set_halign(Gtk.Align.START)
+            title_label.get_style_context().add_class("menu-title")
+            title_box.pack_start(title_label, False, False, 0)
+            
+            if clazz:
+                class_label = Gtk.Label()
+                class_label.set_markup(f"<small>{GLib.markup_escape_text(clazz)}</small>")
+                class_label.set_halign(Gtk.Align.START)
+                class_label.get_style_context().add_class("menu-subtitle")
+                title_box.pack_start(class_label, False, False, 0)
+            
+            title_row = Gtk.ListBoxRow()
+            title_row.set_selectable(False)
+            title_row.set_activatable(False)
+            title_row.add(title_box)
+            self.list_box.add(title_row)
+            
+            # Separator row
+            sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            sep_row = Gtk.ListBoxRow()
+            sep_row.set_selectable(False)
+            sep_row.set_activatable(False)
+            sep_row.add(sep)
+            self.list_box.add(sep_row)
+        
+        # Build actions
+        for action in self.config.get("actions", []):
+            self.add_action_item(action)
+        
+        self.list_box.show_all()
+        self.list_box.connect("row-activated", self.on_row_activated)
+    
+    def add_action_item(self, action: dict):
+        """Add a menu item or submenu based on action config."""
+        item_type = action.get("type", "action")
+        
+        if item_type == "separator":
+            sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            sep_row = Gtk.ListBoxRow()
+            sep_row.set_selectable(False)
+            sep_row.set_activatable(False)
+            sep_row.add(sep)
+            self.list_box.add(sep_row)
+            return
+        
+        if item_type in ("submenu_workspaces", "submenu_monitors"):
+            label = action.get("label", "Submenu")
+            icon_name = action.get("icon", "")
+            shortcut = action.get("shortcut", "")
+            
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            
+            if icon_name:
+                icon = Gio.ThemedIcon(name=icon_name)
+                image = Gtk.Image.new_from_gicon(icon, Gtk.IconSize.MENU)
+                hbox.pack_start(image, False, False, 6)
+            
+            label_widget = Gtk.Label(label=label)
+            label_widget.set_halign(Gtk.Align.START)
+            hbox.pack_start(label_widget, True, True, 0)
+            
+            if shortcut:
+                shortcut_label = Gtk.Label()
+                shortcut_label.set_markup(f"<small><kbd>{shortcut}</kbd></small>")
+                shortcut_label.get_style_context().add_class("menu-shortcut")
+                hbox.pack_start(shortcut_label, False, False, 6)
+            
+            # Arrow indicator
+            arrow = Gtk.Label(label="▶")
+            arrow.set_halign(Gtk.Align.END)
+            hbox.pack_start(arrow, False, False, 6)
+            
+            row = Gtk.ListBoxRow()
+            row.set_data("action", action)
+            row.add(hbox)
+            self.list_box.add(row)
+            return
+        
+        # Regular action
+        label = action.get("label", "Action")
+        icon_name = action.get("icon", "")
+        shortcut = action.get("shortcut", "")
+        
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        
+        if icon_name:
+            icon = Gio.ThemedIcon(name=icon_name)
+            image = Gtk.Image.new_from_gicon(icon, Gtk.IconSize.MENU)
+            hbox.pack_start(image, False, False, 6)
+        
+        label_widget = Gtk.Label(label=label)
+        label_widget.set_halign(Gtk.Align.START)
+        hbox.pack_start(label_widget, True, True, 0)
+        
+        if shortcut:
+            shortcut_label = Gtk.Label()
+            shortcut_label.set_markup(f"<small><kbd>{shortcut}</kbd></small>")
+            shortcut_label.get_style_context().add_class("menu-shortcut")
+            hbox.pack_start(shortcut_label, False, False, 6)
+        
+        row = Gtk.ListBoxRow()
+        row.set_data("action", action)
+        row.add(hbox)
+        self.list_box.add(row)
+    
+    def on_row_activated(self, list_box, row):
+        """Handle menu item activation."""
+        action = row.get_data("action")
+        if not action:
+            return
+        
+        item_type = action.get("type", "action")
+        
+        if item_type == "submenu_workspaces":
+            self.show_submenu("workspaces")
+            return
+        elif item_type == "submenu_monitors":
+            self.show_submenu("monitors")
+            return
+        
+        dispatcher = action.get("dispatcher", "")
+        arg = action.get("arg", "")
+        confirm = action.get("confirm", False)
+        
+        if confirm:
+            dialog = Gtk.MessageDialog(
+                transient_for=self,
+                flags=0,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.YES_NO,
+                text="Confirm Action",
+            )
+            dialog.format_secondary_text(f"Are you sure you want to force kill this window?\n\n{self.window_info.get('title', 'Unknown')}")
+            response = dialog.run()
+            dialog.destroy()
+            if response != Gtk.ResponseType.YES:
+                return
+        
+        self.execute_dispatcher(dispatcher, arg)
+        self.destroy()
+    
+    def show_submenu(self, submenu_type: str):
+        """Show a submenu dialog."""
+        if submenu_type == "workspaces":
+            items = [(f"Workspace {w.get('name', w.get('id', '?'))}", str(w.get('name', w.get('id', 1)))) for w in sorted(self.get_workspaces(), key=lambda x: x.get("id", 0))]
+            items.append(("Special: Minimized", "special:minimized"))
+        elif submenu_type == "monitors":
+            items = [(m.get("description", m.get("name", "?")), m.get("name", "")) for m in self.get_monitors()]
+        else:
+            return
+        
+        dialog = Gtk.Dialog(title="Select " + submenu_type.capitalize(), transient_for=self, flags=0)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.set_default_size(250, 300)
+        
+        list_box = Gtk.ListBox()
+        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        
+        for label, value in items:
+            row = Gtk.ListBoxRow()
+            lbl = Gtk.Label(label=label)
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_margin_start(12)
+            lbl.set_margin_end(12)
+            lbl.set_margin_top(8)
+            lbl.set_margin_bottom(8)
+            row.add(lbl)
+            row.set_data("value", value)
+            list_box.add(row)
+        
+        list_box.show_all()
+        list_box.connect("row-activated", lambda box, r: dialog.response(Gtk.ResponseType.OK) or dialog.set_data("selected", r.get_data("value")))
+        
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.add(list_box)
+        scroller.show_all()
+        
+        dialog.get_content_area().pack_start(scroller, True, True, 0)
+        dialog.get_content_area().set_border_width(12)
+        
+        response = dialog.run()
+        selected = dialog.get_data("selected")
+        dialog.destroy()
+        
+        if response == Gtk.ResponseType.OK and selected:
+            if submenu_type == "workspaces":
+                self.execute_dispatcher("movetoworkspacesilent", selected)
+            elif submenu_type == "monitors":
+                # Find workspace on that monitor
+                monitors = self.get_monitors()
+                target_ws = None
+                for mon in monitors:
+                    if mon.get("name") == selected:
+                        active_ws = mon.get("activeWorkspace", {})
+                        target_ws = active_ws.get("name", str(active_ws.get("id", 1)))
+                        break
+                if target_ws and self.window_address:
+                    run_hyprctl("dispatch", "focuswindow", f"address:{self.window_address}")
+                    self.execute_dispatcher("movetoworkspacesilent", target_ws)
+        
+        self.destroy()
+    
+    def popup_at_cursor(self):
+        """Show menu at current cursor position."""
+        x, y = self.get_cursor_pos()
+        
+        # Get monitor geometry to keep menu on screen
+        screen = Gdk.Screen.get_default()
+        monitor = screen.get_monitor_at_point(x, y)
+        geo = screen.get_monitor_geometry(monitor)
+        
+        # Position using layer shell margins
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, max(0, y - geo.y))
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, max(0, x - geo.x))
+        
+        self.show_all()
+        
+        # After showing, check if we overflow and adjust
+        GLib.idle_add(self.adjust_position, geo, x, y)
+    
+    def adjust_position(self, geo, orig_x, orig_y):
+        """Adjust menu position to keep it on screen."""
+        alloc = self.get_allocated_width(), self.get_allocated_height()
+        
+        new_x = orig_x
+        new_y = orig_y
+        
+        if orig_x + alloc[0] > geo.x + geo.width:
+            new_x = geo.x + geo.width - alloc[0]
+        if orig_y + alloc[1] > geo.y + geo.height:
+            new_y = geo.y + geo.height - alloc[1]
+        
+        if new_x != orig_x or new_y != orig_y:
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, max(0, new_y - geo.y))
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, max(0, new_x - geo.x))
+        
+        return False
+    
+    def on_key_press(self, widget, event):
+        """Handle key press events."""
+        if event.keyval == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        return False
+    
+    def on_focus_out(self, widget, event):
+        """Close menu when focus is lost."""
+        self.destroy()
+        return False
+    
+    def on_button_press(self, widget, event):
+        """Close menu when clicking outside."""
+        # Check if click is inside the window
+        alloc = self.get_allocation()
+        if event.x < 0 or event.y < 0 or event.x > alloc.width or event.y > alloc.height:
+            self.destroy()
+            return True
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Hyprland Window Context Menu")
+    parser.add_argument("--config", "-c", help="Path to config JSON file")
+    parser.add_argument("--window", "-w", help="Target window address (hex)")
+    parser.add_argument("--version", "-v", action="store_true", help="Show version")
+    args = parser.parse_args()
+    
+    if args.version:
+        print("hypr-windowmenu 1.0.0")
+        sys.exit(0)
+    
+    # Initialize GTK
+    Gtk.init(sys.argv)
+    
+    # Create menu
+    menu = HyprWindowMenu(config_path=args.config, window_address=args.window)
+    
+    # Connect destroy handler to quit GTK main loop
+    menu.connect("destroy", Gtk.main_quit)
+    
+    # Show menu at cursor
+    menu.popup_at_cursor()
+    
+    # Run GTK main loop
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
