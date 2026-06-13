@@ -160,20 +160,42 @@ class SettingsWindow(Gtk.Window):
         self.connect("delete-event", self.on_close)
     
     def find_config_path(self) -> str:
+        """Find existing config or return user config path."""
         xdg_config = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        user_path = os.path.join(xdg_config, "hypr-windowmenu", "config.json")
+        user_dir = os.path.join(xdg_config, "hypr-windowmenu")
+        user_path = os.path.join(user_dir, "config.json")
+        
+        # If user config exists, use it
         if os.path.exists(user_path):
             return user_path
-        # Default system path
-        return "/usr/share/hypr-windowmenu/config.json"
+        
+        # Check legacy paths
+        for cfg_path in [
+            os.path.join(xdg_config, "hypr", "windowmenu.json"),
+            "/usr/share/hypr-windowmenu/config.json",
+        ]:
+            if os.path.exists(cfg_path):
+                return cfg_path
+        
+        # Default to user path (will be created on save)
+        return user_path
     
     def load_config(self) -> dict:
+        """Load config from found path or return defaults."""
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r") as f:
-                    return json.load(f)
+                    loaded = json.load(f)
+                    # Validate structure
+                    if isinstance(loaded, dict) and "actions" in loaded:
+                        return loaded
+                    print(f"Invalid config structure in {self.config_path}, using defaults", file=sys.stderr)
+            except json.JSONDecodeError as e:
+                print(f"Corrupted config file {self.config_path}: {e}", file=sys.stderr)
+                print("Using default configuration", file=sys.stderr)
             except Exception as e:
-                print(f"Failed to load config: {e}", file=sys.stderr)
+                print(f"Failed to load config from {self.config_path}: {e}", file=sys.stderr)
+        
         return copy.deepcopy(DEFAULT_CONFIG)
     
     def build_general_tab(self) -> Gtk.Widget:
@@ -617,6 +639,7 @@ the new settings. No need to restart Hyprland."""
             self.status_label.set_text("Moved down — remember to Save")
     
     def on_save(self, btn):
+        """Save config with proper directory creation and validation."""
         # Update general settings
         self.config["menu"] = {
             "show_title": self.show_title_check.get_active(),
@@ -625,21 +648,33 @@ the new settings. No need to restart Hyprland."""
         }
         
         # Ensure user config dir exists
-        user_dir = os.path.join(
-            os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-            "hypr-windowmenu"
-        )
-        os.makedirs(user_dir, exist_ok=True)
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        user_dir = os.path.join(xdg_config, "hypr-windowmenu")
+        
+        try:
+            os.makedirs(user_dir, exist_ok=True)
+        except OSError as e:
+            self.status_label.set_text(f"Cannot create config directory: {e}")
+            return
+        
         user_path = os.path.join(user_dir, "config.json")
         
         try:
+            # Validate before saving
+            if not isinstance(self.config, dict) or "actions" not in self.config:
+                raise ValueError("Invalid config structure")
+            
             with open(user_path, "w") as f:
                 json.dump(self.config, f, indent=4)
+            
             self.config_path = user_path
             self.modified = False
             self.status_label.set_text(f"Saved to {user_path}")
+            print(f"Config saved to {user_path}", file=sys.stderr)
+            
         except Exception as e:
             self.status_label.set_text(f"Save failed: {e}")
+            print(f"Save error: {e}", file=sys.stderr)
     
     def on_reset_defaults(self, btn):
         dialog = Gtk.MessageDialog(

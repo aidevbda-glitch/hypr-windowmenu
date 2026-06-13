@@ -265,12 +265,28 @@ class HyprWindowMenu(Gtk.Window):
         return (0, 0)
     
     def find_window_under_cursor(self) -> dict | None:
-        """Find the topmost window containing the cursor."""
+        """Find the topmost window containing the cursor with workspace filtering."""
         cursor_x, cursor_y = self.get_cursor_pos()
         clients = run_hyprctl_json("clients")
         
         if not isinstance(clients, list):
+            print("DEBUG: No clients returned from hyprctl", file=sys.stderr)
             return None
+        
+        # Get current workspace to filter windows
+        active_workspace = run_hyprctl_json("activeworkspace")
+        current_ws_name = None
+        if isinstance(active_workspace, dict):
+            current_ws_name = active_workspace.get("name")
+        
+        # Get active monitor for additional filtering
+        active_monitor = None
+        monitors = run_hyprctl_json("monitors")
+        if isinstance(monitors, list):
+            for mon in monitors:
+                if mon.get("focused"):
+                    active_monitor = mon.get("name")
+                    break
         
         candidates = []
         for w in clients:
@@ -279,25 +295,52 @@ class HyprWindowMenu(Gtk.Window):
             wx, wy = at[0], at[1]
             ww, wh = size[0], size[1]
             
-            if wx <= cursor_x <= wx + ww and wy <= cursor_y <= wy + wh:
+            # Check if cursor is inside window
+            inside = wx <= cursor_x <= wx + ww and wy <= cursor_y <= wy + wh
+            
+            # Get workspace info
+            ws = w.get("workspace", {})
+            ws_name = ws.get("name") if isinstance(ws, dict) else None
+            
+            # Skip windows on other workspaces (unless pinned)
+            if current_ws_name and ws_name and ws_name != current_ws_name:
+                if not w.get("pinned", False):
+                    continue
+            
+            if inside:
                 score = 0
+                # Floating windows are on top
                 if w.get("floating", False):
                     score += 1000
+                # Pinned windows stay on top
                 if w.get("pinned", False):
                     score += 500
-                if w.get("focusHistoryID", 999) == 0:
-                    score += 200
+                # Recently focused window bonus (lower ID = more recent)
+                focus_id = w.get("focusHistoryID", 999)
+                if focus_id == 0:
+                    score += 300
+                elif focus_id <= 2:
+                    score += 100
+                # Current workspace match bonus
+                if ws_name == current_ws_name:
+                    score += 50
+                
                 candidates.append((score, w))
+                print(f"DEBUG: Window '{w.get('title', 'Unknown')}' score={score} floating={w.get('floating')} pinned={w.get('pinned')} focusID={focus_id}", file=sys.stderr)
         
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
-            return candidates[0][1]
+            best = candidates[0][1]
+            print(f"DEBUG: Selected window: {best.get('title', 'Unknown')}", file=sys.stderr)
+            return best
         
-        # Fallback to active window
+        # Fallback to active window if no window at cursor position
         active = run_hyprctl_json("activewindow")
         if active and isinstance(active, dict) and active.get("address"):
+            print(f"DEBUG: Fallback to active window: {active.get('title', 'Unknown')}", file=sys.stderr)
             return active
         
+        print("DEBUG: No window found at cursor and no active window", file=sys.stderr)
         return None
     
     def get_window_by_address(self, addr: str) -> dict | None:
@@ -374,6 +417,28 @@ class HyprWindowMenu(Gtk.Window):
             self.list_box.add(title_row)
             
             # Separator row
+            sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            sep_row = Gtk.ListBoxRow()
+            sep_row.set_selectable(False)
+            sep_row.set_activatable(False)
+            sep_row.add(sep)
+            self.list_box.add(sep_row)
+        elif not self.window_info:
+            # No window detected - show message
+            msg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            msg_label = Gtk.Label()
+            msg_label.set_markup("<i><span foreground='#bf616a'>No window detected</span></i>")
+            msg_label.set_halign(Gtk.Align.START)
+            msg_label.set_padding(8, 8)
+            msg_box.pack_start(msg_label, False, False, 0)
+            
+            msg_row = Gtk.ListBoxRow()
+            msg_row.set_selectable(False)
+            msg_row.set_activatable(False)
+            msg_row.add(msg_box)
+            self.list_box.add(msg_row)
+            
+            # Separator
             sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
             sep_row = Gtk.ListBoxRow()
             sep_row.set_selectable(False)
@@ -624,6 +689,7 @@ def main():
     parser.add_argument("--config", "-c", help="Path to config JSON file")
     parser.add_argument("--window", "-w", help="Target window address (hex)")
     parser.add_argument("--version", "-v", action="store_true", help="Show version")
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug output")
     args = parser.parse_args()
     
     if args.version:
